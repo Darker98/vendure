@@ -1,14 +1,15 @@
 import { PluginCommonModule, VendurePlugin } from '@vendure/core';
 
+import { adminApiExtensions } from './admin-api-extensions';
 import { shopApiExtensions } from './api/api-extensions';
 import { PaypalShopResolver } from './api/paypal-shop.resolver';
 import { PAYPAL_PLUGIN_OPTIONS } from './constants';
 import { paypalPaymentHandler } from './payment-handler/paypal.payment-handler';
+import { PaypalReportingAdminResolver } from './reporting/paypal-reporting-admin.resolver';
 import { PaypalSubscriptionRecord } from './subscription/entities/paypal-subscription.entity';
 import { PaypalSubscriptionAdminResolver } from './subscription/paypal-subscription-admin.resolver';
 import { PaypalSubscriptionModule } from './subscription/paypal-subscription.module';
 import { PaypalSubscriptionShopResolver } from './subscription/paypal-subscription-shop.resolver';
-import { subscriptionAdminApiExtensions } from './subscription/subscription-api-extensions';
 import { PaypalPluginOptions } from './types';
 
 /**
@@ -21,6 +22,7 @@ import { PaypalPluginOptions } from './types';
  *  4. Full refund
  *  5. Partial refund
  *  6. Subscription billing (recurring payments)
+ *  7. Transaction reporting (search + account balances)
  *
  * Usage:
  * ```ts
@@ -47,8 +49,11 @@ import { PaypalPluginOptions } from './types';
         resolvers: [PaypalShopResolver, PaypalSubscriptionShopResolver],
     },
     adminApiExtensions: {
-        schema: subscriptionAdminApiExtensions,
-        resolvers: [PaypalSubscriptionAdminResolver],
+        schema: adminApiExtensions,
+        resolvers: [
+            PaypalSubscriptionAdminResolver,
+            PaypalReportingAdminResolver,
+        ],
     },
     configuration: config => {
         config.paymentOptions.paymentMethodHandlers.push(paypalPaymentHandler);
