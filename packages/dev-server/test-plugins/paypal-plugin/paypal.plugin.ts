@@ -4,6 +4,7 @@ import { adminApiExtensions } from './admin-api-extensions';
 import { shopApiExtensions } from './api/api-extensions';
 import { PaypalShopResolver } from './api/paypal-shop.resolver';
 import { PAYPAL_PLUGIN_OPTIONS } from './constants';
+import { PaypalShipmentTrackingModule } from './fulfillment/paypal-shipment-tracking.module';
 import { paypalPaymentHandler } from './payment-handler/paypal.payment-handler';
 import { PaypalReportingAdminResolver } from './reporting/paypal-reporting-admin.resolver';
 import { PaypalSubscriptionRecord } from './subscription/entities/paypal-subscription.entity';
@@ -23,6 +24,7 @@ import { PaypalPluginOptions } from './types';
  *  5. Partial refund
  *  6. Subscription billing (recurring payments)
  *  7. Transaction reporting (search + account balances)
+ *  8. Order shipment tracking (EventBus → PayPal tracking on fulfillment state → Shipped)
  *
  * Usage:
  * ```ts
@@ -36,7 +38,7 @@ import { PaypalPluginOptions } from './types';
  * ```
  */
 @VendurePlugin({
-    imports: [PluginCommonModule, PaypalSubscriptionModule],
+    imports: [PluginCommonModule, PaypalSubscriptionModule, PaypalShipmentTrackingModule],
     entities: [PaypalSubscriptionRecord],
     providers: [
         {
