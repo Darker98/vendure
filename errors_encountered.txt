@@ -1,0 +1,18 @@
+===================
+Errors Encountered
+===================
+
+Use Case 1:
+Error handling was not returning what the error is
+ReturnUrl and CancelUrl were omitted for payment flow
+Order was not being transitioned to "ArrangingPayment"
+Customer and shipping details were not set in storefront
+
+Use Case 2:
+Handler defaulted payment intent to CAPTURED rather than AUTHORIZE. Agent forgot to update it when working on feature 2
+
+Use Case 4/5:
+Testing request body had shipping as 0; system was not allowing "partial refund"
+Raw error was being returned in response, character limit did not allow this
+
+
