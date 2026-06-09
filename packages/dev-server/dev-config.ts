@@ -27,6 +27,7 @@ import { DataSourceOptions } from 'typeorm';
 import { NavModifierPlugin } from './test-plugins/nav-modifier-plugin/nav-modifier-plugin';
 // import { FieldTestPlugin } from './test-plugins/field-test/field-test-plugin';
 import { ReviewsPlugin } from './test-plugins/reviews/reviews-plugin';
+import { PaypalPlugin } from './test-plugins/paypal-plugin/paypal.plugin';
 
 const IS_INSTRUMENTED = process.env.IS_INSTRUMENTED === 'true';
 
@@ -121,6 +122,13 @@ export const devConfig: VendureConfig = {
         // }),
         ReadonlySettingsTestPlugin,
         ReviewsPlugin,
+        PaypalPlugin.init({
+            clientId: process.env.PAYPAL_CLIENT_ID || '',
+            clientSecret: process.env.PAYPAL_CLIENT_SECRET || '',
+            environment: (process.env.PAYPAL_ENVIRONMENT as 'sandbox' | 'production') || 'sandbox',
+            returnUrl: process.env.PAYPAL_RETURN_URL || 'http://localhost:3000/checkout/paypal-return',
+            cancelUrl: process.env.PAYPAL_CANCEL_URL || 'http://localhost:3000/checkout/paypal-cancel',
+        }),
         // FieldTestPlugin,
         NavModifierPlugin,
         GraphiqlPlugin.init(),
@@ -239,8 +247,8 @@ function getDbConfig(): DataSourceOptions {
             return {
                 synchronize: true,
                 type: 'mariadb',
-                host: '127.0.0.1',
-                port: 3306,
+                host: process.env.DB_HOST || '127.0.0.1',
+                port: 3307,
                 username: 'vendure',
                 password: 'password',
                 database: 'vendure-dev',
