@@ -99,6 +99,56 @@ export const paypalPaymentHandler = new PaymentMethodHandler({
         }
     },
 
+    async cancelPayment(_ctx, _order, payment, _args) {
+        const meta = payment.metadata as Record<string, unknown>;
+        const authorizationId = meta?.authorizationId as string | undefined;
+
+        // A CAPTURE-intent payment (already Settled) cannot be voided.
+        // Refunds for settled payments are handled by createRefund (Features 4 & 5).
+        if (!authorizationId) {
+            return {
+                success: false as const,
+                errorMessage:
+                    'This payment was captured immediately and cannot be voided. ' +
+                    'Use a refund instead.',
+            };
+        }
+
+        Logger.verbose(`Voiding PayPal authorization ${authorizationId}`, loggerCtx);
+
+        try {
+            const client = getPayPalClient(PaypalPlugin.options);
+            const paymentsController = new PaymentsController(client);
+
+            // voidPayment returns 204 No Content on success (result is null).
+            // The SDK throws ApiError on any 4xx/5xx, so reaching the line below means success.
+            await paymentsController.voidPayment({
+                authorizationId,
+                prefer: 'return=minimal',
+            });
+
+            Logger.verbose(`PayPal authorization ${authorizationId} voided successfully`, loggerCtx);
+
+            return {
+                success: true as const,
+                metadata: {
+                    ...meta,
+                    authorizationStatus: 'VOIDED',
+                },
+            };
+        } catch (err: unknown) {
+            const message = extractErrorMessage(err);
+            Logger.error(
+                `PayPal void failed for authorization ${authorizationId}: ${message}`,
+                loggerCtx,
+            );
+            return {
+                success: false as const,
+                errorMessage: `PayPal void failed: ${message}`,
+            };
+        }
+    },
+
     async settlePayment(_ctx, _order, payment, _args) {
         const meta = payment.metadata as Record<string, unknown>;
         const authorizationId = meta?.authorizationId as string | undefined;
