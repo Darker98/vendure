@@ -1,4 +1,4 @@
-import { Mutation, Resolver } from '@nestjs/graphql';
+import { Args, Mutation, Resolver } from '@nestjs/graphql';
 import {
     ActiveOrderService,
     Ctx,
@@ -43,7 +43,10 @@ export class PaypalShopResolver {
     ) {}
 
     @Mutation()
-    async createPaypalOrder(@Ctx() ctx: RequestContext): Promise<PaypalOrderResult> {
+    async createPaypalOrder(
+        @Ctx() ctx: RequestContext,
+        @Args('intent') intent: 'CAPTURE' | 'AUTHORIZE' = 'CAPTURE',
+    ): Promise<PaypalOrderResult> {
         if (!ctx.session) {
             throw new GraphQLError(
                 'No active session. Include the vendure-auth-token from your previous ' +
@@ -99,15 +102,20 @@ export class PaypalShopResolver {
         const currencyCode = order.currencyCode as string;
         const { returnUrl, cancelUrl } = PaypalPlugin.options;
 
+        const paypalIntent =
+            intent === 'AUTHORIZE'
+                ? CheckoutPaymentIntent.Authorize
+                : CheckoutPaymentIntent.Capture;
+
         Logger.verbose(
-            `Creating PayPal order for Vendure order ${order.code} — ${currencyCode} ${amountValue}`,
+            `Creating PayPal order (intent: ${intent}) for Vendure order ${order.code} — ${currencyCode} ${amountValue}`,
             loggerCtx,
         );
 
         try {
             const response = await ordersController.createOrder({
                 body: {
-                    intent: CheckoutPaymentIntent.Capture,
+                    intent: paypalIntent,
                     purchaseUnits: [
                         {
                             referenceId: order.code,
@@ -119,7 +127,7 @@ export class PaypalShopResolver {
                     ],
                     // returnUrl/cancelUrl are required for the redirect flow.
                     // userAction: PAY_NOW shows "Pay Now" instead of "Continue",
-                    // which is correct for an immediate-capture intent.
+                    // which is correct for both immediate-capture and authorize intents.
                     applicationContext: {
                         returnUrl,
                         cancelUrl,
@@ -142,7 +150,7 @@ export class PaypalShopResolver {
                 );
             }
 
-            Logger.verbose(`PayPal order created: ${paypalOrder.id}`, loggerCtx);
+            Logger.verbose(`PayPal order created: ${paypalOrder.id} (intent: ${intent})`, loggerCtx);
 
             return {
                 paypalOrderId: paypalOrder.id,

@@ -1,29 +1,63 @@
 import { LanguageCode, Logger, PaymentMethodHandler } from '@vendure/core';
-import { ApiError, CustomError, OrdersController } from '@paypal/paypal-server-sdk';
+import {
+    ApiError,
+    AuthorizationStatus,
+    CaptureStatus,
+    CustomError,
+    OrdersController,
+    PaymentsController,
+} from '@paypal/paypal-server-sdk';
 
 import { loggerCtx } from '../constants';
 import { getPayPalClient } from '../paypal-client';
 import { PaypalPlugin } from '../paypal.plugin';
 
 /**
- * PayPal payment handler — Standard Checkout (Immediate Capture).
+ * PayPal payment handler — supports both:
  *
- * Expected storefront flow:
- *  1. Storefront calls `createPaypalOrder` mutation → receives { paypalOrderId, approvalUrl }.
- *  2. Buyer approves the order via PayPal (redirect or embedded JS SDK).
- *  3. Storefront calls `addPaymentToOrder` with:
- *       input: { method: "paypal", metadata: { paypalOrderId: "<id>" } }
- *  4. `createPayment` captures the approved PayPal order and returns state "Settled".
+ *  Feature 1: Standard Checkout (Immediate Capture)
+ *    - createPaypalOrder(intent: CAPTURE) on the Shop API
+ *    - addPaymentToOrder → createPayment captures immediately → state "Settled"
+ *    - settlePayment is a no-op
  *
- * The `settlePayment` hook is a no-op because the payment is already settled
- * inside `createPayment` for this immediate-capture path.
+ *  Feature 2: Authorize-then-Capture
+ *    - createPaypalOrder(intent: AUTHORIZE) on the Shop API
+ *    - addPaymentToOrder → createPayment authorizes → state "Authorized"
+ *    - Admin calls settlePayment (e.g. at shipment) → captures the authorization
+ *
+ * The `intent` arg on the payment method (configured in the admin UI) drives
+ * which path is taken. Default is CAPTURE.
  */
 export const paypalPaymentHandler = new PaymentMethodHandler({
     code: 'paypal',
     description: [{ languageCode: LanguageCode.en, value: 'PayPal' }],
-    args: {},
+    args: {
+        intent: {
+            type: 'string' as const,
+            label: [{ languageCode: LanguageCode.en, value: 'Payment Intent' }],
+            description: [
+                {
+                    languageCode: LanguageCode.en,
+                    value:
+                        'CAPTURE: funds are collected immediately when the buyer approves. ' +
+                        'AUTHORIZE: funds are reserved now and captured later (e.g. at shipment).',
+                },
+            ],
+            options: [
+                {
+                    value: 'CAPTURE',
+                    label: [{ languageCode: LanguageCode.en, value: 'Capture (immediate payment)' }],
+                },
+                {
+                    value: 'AUTHORIZE',
+                    label: [{ languageCode: LanguageCode.en, value: 'Authorize (capture at fulfillment)' }],
+                },
+            ],
+            defaultValue: 'CAPTURE',
+        },
+    },
 
-    async createPayment(_ctx, _order, amount, _args, metadata) {
+    async createPayment(_ctx, _order, amount, args, metadata) {
         const paypalOrderId = (metadata as Record<string, unknown>).paypalOrderId as string | undefined;
 
         if (!paypalOrderId || typeof paypalOrderId !== 'string' || paypalOrderId.trim() === '') {
@@ -31,94 +65,223 @@ export const paypalPaymentHandler = new PaymentMethodHandler({
             return {
                 amount,
                 state: 'Declined' as const,
-                errorMessage: 'Missing paypalOrderId in payment metadata. Complete the PayPal approval step first.',
+                errorMessage:
+                    'Missing paypalOrderId in payment metadata. ' +
+                    'Complete the PayPal approval step before calling addPaymentToOrder.',
             };
         }
+
+        // Intent can be supplied two ways (metadata takes precedence):
+        //   1. metadata.intent — passed by the storefront via addPaymentToOrder
+        //   2. args.intent    — the default configured on the payment method in the Admin UI
+        const intentFromMetadata = (metadata as Record<string, unknown>).intent as string | undefined;
+        const intentFromArgs = args.intent as string;
+        const intent = (intentFromMetadata ?? intentFromArgs) === 'AUTHORIZE' ? 'AUTHORIZE' : 'CAPTURE';
 
         try {
             const client = getPayPalClient(PaypalPlugin.options);
             const ordersController = new OrdersController(client);
 
-            Logger.verbose(`Capturing PayPal order ${paypalOrderId}`, loggerCtx);
-
-            const response = await ordersController.captureOrder({
-                id: paypalOrderId,
-                prefer: 'return=representation',
-            });
-
-            const capturedOrder = response.result;
-
-            if (capturedOrder.status !== 'COMPLETED') {
-                Logger.warn(
-                    `PayPal capture for order ${paypalOrderId} returned unexpected status: ${capturedOrder.status}`,
-                    loggerCtx,
-                );
-                return {
-                    amount,
-                    state: 'Declined' as const,
-                    errorMessage: `PayPal capture returned status: ${capturedOrder.status}`,
-                    metadata: {
-                        paypalOrderId,
-                        paypalStatus: capturedOrder.status,
-                    },
-                };
+            if (intent === 'CAPTURE') {
+                return await captureOrder(ordersController, paypalOrderId, amount);
+            } else {
+                return await authorizeOrder(ordersController, paypalOrderId, amount);
             }
-
-            const captureId =
-                capturedOrder.purchaseUnits?.[0]?.payments?.captures?.[0]?.id;
-
-            Logger.verbose(
-                `PayPal order ${paypalOrderId} captured successfully. CaptureId: ${captureId}`,
-                loggerCtx,
-            );
-
-            return {
-                amount,
-                state: 'Settled' as const,
-                transactionId: captureId ?? paypalOrderId,
-                metadata: {
-                    paypalOrderId,
-                    captureId: captureId ?? null,
-                    paypalStatus: capturedOrder.status,
-                },
-            };
         } catch (err: unknown) {
-            const isApiError = err instanceof ApiError;
-            const isCustomError = err instanceof CustomError;
-
-            const statusCode = isApiError ? (err as ApiError).statusCode : undefined;
-            const body = isApiError ? (err as ApiError).body : undefined;
-            const message =
-                err instanceof Error ? err.message : 'Unknown PayPal error';
-
-            Logger.error(
-                `PayPal capture failed for order ${paypalOrderId}: [${statusCode ?? 'N/A'}] ${message}`,
-                loggerCtx,
-            );
-
-            if (isCustomError) {
-                Logger.error(
-                    `PayPal error details: ${JSON.stringify((err as CustomError).result)}`,
-                    loggerCtx,
-                );
-            }
-
+            const message = extractErrorMessage(err);
+            Logger.error(`PayPal createPayment failed for order ${paypalOrderId}: ${message}`, loggerCtx);
             return {
                 amount,
                 state: 'Declined' as const,
-                errorMessage: `PayPal capture failed: ${message}`,
-                metadata: {
-                    paypalOrderId,
-                    errorStatusCode: statusCode,
-                    errorBody: body,
-                },
+                errorMessage: `PayPal error: ${message}`,
+                metadata: { paypalOrderId },
             };
         }
     },
 
-    async settlePayment(_ctx, _order, _payment, _args) {
-        // The payment was already captured (settled) inside createPayment.
-        // This no-op satisfies Vendure's two-step interface.
-        return { success: true };
+    async settlePayment(_ctx, _order, payment, _args) {
+        const meta = payment.metadata as Record<string, unknown>;
+        const authorizationId = meta?.authorizationId as string | undefined;
+
+        // CAPTURE path: payment was already settled inside createPayment.
+        if (!authorizationId) {
+            return { success: true };
+        }
+
+        // AUTHORIZE path: capture the reserved funds now.
+        Logger.verbose(
+            `Capturing authorized payment. AuthorizationId: ${authorizationId}`,
+            loggerCtx,
+        );
+
+        try {
+            const client = getPayPalClient(PaypalPlugin.options);
+            const paymentsController = new PaymentsController(client);
+
+            const response = await paymentsController.captureAuthorizedPayment({
+                authorizationId,
+                prefer: 'return=representation',
+            });
+
+            const captured = response.result;
+
+            if (captured.status !== CaptureStatus.Completed) {
+                Logger.warn(
+                    `PayPal capture for authorization ${authorizationId} returned status: ${captured.status}`,
+                    loggerCtx,
+                );
+                return {
+                    success: false as const,
+                    errorMessage: `PayPal capture returned status: ${captured.status}`,
+                    metadata: {
+                        ...meta,
+                        captureId: captured.id,
+                        captureStatus: captured.status,
+                    },
+                };
+            }
+
+            Logger.verbose(
+                `Authorization ${authorizationId} captured successfully. CaptureId: ${captured.id}`,
+                loggerCtx,
+            );
+
+            return {
+                success: true as const,
+                metadata: {
+                    ...meta,
+                    captureId: captured.id,
+                    captureStatus: captured.status,
+                },
+            };
+        } catch (err: unknown) {
+            const message = extractErrorMessage(err);
+            Logger.error(
+                `PayPal settlePayment failed for authorization ${authorizationId}: ${message}`,
+                loggerCtx,
+            );
+            return {
+                success: false as const,
+                errorMessage: `PayPal capture failed: ${message}`,
+            };
+        }
     },
 });
+
+// ---------------------------------------------------------------------------
+// Private helpers
+// ---------------------------------------------------------------------------
+
+async function captureOrder(
+    ordersController: OrdersController,
+    paypalOrderId: string,
+    amount: number,
+) {
+    Logger.verbose(`Capturing PayPal order ${paypalOrderId}`, loggerCtx);
+
+    const response = await ordersController.captureOrder({
+        id: paypalOrderId,
+        prefer: 'return=representation',
+    });
+
+    const capturedOrder = response.result;
+
+    if (capturedOrder.status !== 'COMPLETED') {
+        Logger.warn(
+            `PayPal capture for order ${paypalOrderId} returned status: ${capturedOrder.status}`,
+            loggerCtx,
+        );
+        return {
+            amount,
+            state: 'Declined' as const,
+            errorMessage: `PayPal capture returned status: ${capturedOrder.status}`,
+            metadata: { paypalOrderId, paypalStatus: capturedOrder.status },
+        };
+    }
+
+    const captureId = capturedOrder.purchaseUnits?.[0]?.payments?.captures?.[0]?.id;
+
+    Logger.verbose(
+        `PayPal order ${paypalOrderId} captured. CaptureId: ${captureId}`,
+        loggerCtx,
+    );
+
+    return {
+        amount,
+        state: 'Settled' as const,
+        transactionId: captureId ?? paypalOrderId,
+        metadata: {
+            paypalOrderId,
+            captureId: captureId ?? null,
+            paypalStatus: capturedOrder.status,
+        },
+    };
+}
+
+async function authorizeOrder(
+    ordersController: OrdersController,
+    paypalOrderId: string,
+    amount: number,
+) {
+    Logger.verbose(`Authorizing PayPal order ${paypalOrderId}`, loggerCtx);
+
+    const response = await ordersController.authorizeOrder({
+        id: paypalOrderId,
+        prefer: 'return=representation',
+    });
+
+    const authorizedOrder = response.result;
+    const authorization = authorizedOrder.purchaseUnits?.[0]?.payments?.authorizations?.[0];
+    const authorizationId = authorization?.id;
+    const authStatus = authorization?.status;
+
+    const validStatuses: (AuthorizationStatus | undefined)[] = [
+        AuthorizationStatus.Created,
+        AuthorizationStatus.Pending,
+    ];
+
+    if (!authorizationId || !validStatuses.includes(authStatus)) {
+        Logger.warn(
+            `PayPal authorization for order ${paypalOrderId} returned unexpected status: ${authStatus}`,
+            loggerCtx,
+        );
+        return {
+            amount,
+            state: 'Declined' as const,
+            errorMessage: `PayPal authorization returned status: ${authStatus ?? 'unknown'}`,
+            metadata: {
+                paypalOrderId,
+                authorizationStatus: authStatus,
+            },
+        };
+    }
+
+    Logger.verbose(
+        `PayPal order ${paypalOrderId} authorized. AuthorizationId: ${authorizationId}`,
+        loggerCtx,
+    );
+
+    return {
+        amount,
+        state: 'Authorized' as const,
+        transactionId: authorizationId,
+        metadata: {
+            paypalOrderId,
+            authorizationId,
+            authorizationStatus: authStatus,
+        },
+    };
+}
+
+function extractErrorMessage(err: unknown): string {
+    if (err instanceof CustomError) {
+        return `[${(err as ApiError).statusCode}] ${JSON.stringify((err as CustomError).result)}`;
+    }
+    if (err instanceof ApiError) {
+        return `[${(err as ApiError).statusCode}] ${JSON.stringify((err as ApiError).body)}`;
+    }
+    if (err instanceof Error) {
+        return err.message || `${err.constructor.name} (no message)`;
+    }
+    return JSON.stringify(err);
+}

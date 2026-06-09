@@ -8,15 +8,34 @@ export const shopApiExtensions = gql`
         approvalUrl: String!
     }
 
+    """
+    Controls whether the PayPal order is created with immediate-capture or
+    authorize-then-capture intent.
+    """
+    enum PaypalOrderIntent {
+        """
+        Funds are captured immediately after the buyer approves.
+        addPaymentToOrder will return a Settled payment.
+        """
+        CAPTURE
+        """
+        Funds are reserved (authorized) after the buyer approves but are
+        not moved yet. The admin captures them later via settlePayment
+        (e.g. at the time of shipment).
+        """
+        AUTHORIZE
+    }
+
     extend type Mutation {
         """
-        Creates a PayPal order for the current active Order.
-        Returns the PayPal order ID and approval URL.
-        The storefront must direct the buyer to the approvalUrl (redirect flow)
-        or use the PayPal JS SDK with the paypalOrderId (embedded flow).
-        After buyer approval, call addPaymentToOrder with
-        metadata: { paypalOrderId: "<id>" } to capture the payment.
+        Creates a PayPal order for the current active Order and automatically
+        transitions that Order to the ArrangingPayment state.
+
+        Returns the PayPal order ID and buyer-approval URL.
+
+        After the buyer approves, call addPaymentToOrder with:
+          input: { method: "paypal", metadata: { paypalOrderId: "<id>" } }
         """
-        createPaypalOrder: PaypalOrderResult!
+        createPaypalOrder(intent: PaypalOrderIntent): PaypalOrderResult!
     }
 `;
